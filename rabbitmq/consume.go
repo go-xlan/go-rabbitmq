@@ -13,8 +13,8 @@ import (
 
 type HandleFunc func(name string, data []byte) error
 
-// RunMqConsume 启动 rabbitmq 手动ack模式
-func RunMqConsume(ctx context.Context, cfg *Config, handleFunc HandleFunc, maxRoutine int) error {
+// ConsumeMessage 启动 rabbitmq 手动ack模式
+func ConsumeMessage(ctx context.Context, cfg *Config, handleFunc HandleFunc, maxRoutine int) error {
 	var rateLimit = make(chan struct{}, maxRoutine) // 限制 go routine 的最大数量
 	var onceLimit sync.Once
 	var waitGroup sync.WaitGroup
@@ -22,7 +22,7 @@ func RunMqConsume(ctx context.Context, cfg *Config, handleFunc HandleFunc, maxRo
 	waitGroup.Add(1) //在线程内部的某处会完成它
 	go func() {
 		for {
-			reason, err := rabbitMqRun(ctx, cfg, handleFunc, &onceLimit, &waitGroup, rateLimit)
+			reason, err := consumeMessage(ctx, cfg, handleFunc, &onceLimit, &waitGroup, rateLimit)
 			if err != nil {
 				must.Nice(reason)
 				//假如已经成功初始化，这里就进不来，而只要能进来就必然是未初始化的
@@ -69,25 +69,25 @@ const (
 	MqDisconnected ReasonType = "mq-disconnected"
 )
 
-func rabbitMqRun(ctx context.Context, cfg *Config, handleFunc HandleFunc, onceLimit *sync.Once, waitGroup *sync.WaitGroup, rateLimit chan struct{}) (ReasonType, error) {
+func consumeMessage(ctx context.Context, cfg *Config, handleFunc HandleFunc, onceLimit *sync.Once, waitGroup *sync.WaitGroup, rateLimit chan struct{}) (ReasonType, error) {
 	conn, err := NewConn(cfg)
 	if err != nil {
 		return MqCannotInit, erero.Wro(err)
 	}
 	defer wrapClose(conn.Close)
 
-	ch, err := conn.Channel()
+	amqpChan, err := conn.Channel()
 	if err != nil {
 		return MqCannotInit, erero.Wro(err)
 	}
-	defer wrapClose(ch.Close)
+	defer wrapClose(amqpChan.Close)
 
-	queue, err := QueueDeclare(ch, NewQueueConfig(cfg.QueueName))
+	queue, err := QueueDeclare(amqpChan, NewQueueConfig(cfg.QueueName))
 	if err != nil {
 		return MqCannotInit, erero.Wro(err)
 	}
 
-	deliveries, err := Consume(ch, NewConsumeConfig(queue.Name))
+	deliveries, err := Consume(amqpChan, NewConsumeConfig(queue.Name))
 	if err != nil {
 		return MqCannotInit, erero.Wro(err)
 	}
@@ -108,7 +108,7 @@ func rabbitMqRun(ctx context.Context, cfg *Config, handleFunc HandleFunc, onceLi
 			if !ok {
 				return MqDisconnected, erero.New(string(MqDisconnected))
 			}
-			useGoRun(rateLimit, func() {
+			goroutineRun(rateLimit, func() {
 				//目前这个是 mq 的队列名称
 				queueName := msg.RoutingKey
 				//首个参数是 mq 的队列名称
@@ -197,7 +197,7 @@ func Consume(ch *amqp.Channel, cfg *ConsumeConfig) (<-chan amqp.Delivery, error)
 	return deliveries, nil
 }
 
-func useGoRun(rateLimit chan struct{}, run func()) {
+func goroutineRun(rateLimit chan struct{}, run func()) {
 	rateLimit <- struct{}{}
 	go func() {
 		defer func() {
